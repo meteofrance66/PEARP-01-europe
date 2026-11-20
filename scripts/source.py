@@ -55,14 +55,38 @@ def steps(horizon: int) -> list[int]:
     return list(range(0, horizon - horizon % PAS_TABLE + 1, PAS_TABLE))
 
 
+def attente_retry_after(valeur: str | None, essai: int, maintenant: datetime | None = None) -> float:
+    """Secondes à attendre après un 429 : `Retry-After` en secondes, ou en date (« ven., 20 nov. 2026 22:44:00 GMT », en français :
+    seule l'heure GMT est lue), sinon une attente croissante. Bornée entre 2 et 120 s."""
+    defaut = min(120.0, 20.0 * (essai + 1))
+    if not valeur:
+        return defaut
+    try:
+        return max(2.0, min(120.0, float(valeur)))
+    except ValueError:
+        pass
+    m = re.search(r"(\d{1,2}):(\d{2}):(\d{2})\s*GMT", valeur)
+    if not m:
+        return defaut
+    now = maintenant or datetime.now(timezone.utc)
+    cible = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=int(m.group(3)), microsecond=0)
+    delta = (cible - now).total_seconds()
+    if delta < -3600:  # passage de minuit
+        delta += 86400
+    return max(2.0, min(120.0, delta + 1.0))
+
+
 class Api:
     """Client WCS de Météo-France : clé d'application en en-tête `apikey`, reprise sur coupure et sur 429."""
 
-    def __init__(self, cle: str, pause: float = 0.0, tentatives: int = 4):
+    def __init__(self, cle: str, pause: float = 0.0, tentatives: int = 8):
         if not cle:
             raise SystemExit("Clé absente : définir METEOFRANCE_PEARP_API_KEY (secret GitHub, jamais en dur).")
         self.cle, self.pause, self.tentatives = cle, pause, tentatives
         self._local = threading.local()
+        self._verrou = threading.Lock()
+        self._repos_jusqu_a = 0.0  # instant (time.monotonic) avant lequel plus aucun fil n'appelle l'API (après un 429)
+        self.n_429 = 0
 
     def session(self) -> requests.Session:
         s = getattr(self._local, "s", None)
@@ -70,6 +94,19 @@ class Api:
             s = self._local.s = requests.Session()
             s.headers["apikey"] = self.cle
         return s
+
+    def _attendre_repos(self) -> None:
+        while True:
+            reste = self._repos_jusqu_a - time.monotonic()
+            if reste <= 0:
+                return
+            time.sleep(min(reste, 5.0))
+
+    def _ralentir(self, secondes: float) -> None:
+        """Quota atteint (429) : tous les fils s'arrêtent `secondes` secondes."""
+        with self._verrou:
+            self.n_429 += 1
+            self._repos_jusqu_a = max(self._repos_jusqu_a, time.monotonic() + secondes)
 
     def get(self, membre: int, operation: str, params: dict[str, Any], binaire: bool = False):
         """Appelle une opération WCS ; renvoie le corps (texte ou octets) ou None si 403/404 (donnée pas encore là)."""
@@ -81,20 +118,27 @@ class Api:
             else:
                 q.append((cle, valeur))
         for k in range(self.tentatives):
+            self._attendre_repos()
             if self.pause:
                 time.sleep(self.pause)
             try:
                 r = self.session().get(url, params=q, timeout=120)
                 if r.status_code in (403, 404):
                     return None
-                if r.status_code in (429, 500, 502, 503, 504):
+                if r.status_code == 429:
+                    attente = attente_retry_after(r.headers.get("Retry-After"), k)
+                    self._ralentir(attente)
+                    raise requests.HTTPError(f"HTTP 429 (quota atteint, pause de {attente:.0f} s pour tous les fils)")
+                if r.status_code in (500, 502, 503, 504):
                     raise requests.HTTPError(f"HTTP {r.status_code}")
                 r.raise_for_status()
+                if binaire and r.content[:4] != b"GRIB":
+                    raise requests.HTTPError(f"réponse sans en-tête GRIB ({len(r.content)} octets : {r.content[:80]!r})")
                 return r.content if binaire else r.text
             except requests.RequestException as e:
                 if k == self.tentatives - 1:
                     raise
-                attente = 20 * (k + 1)
+                attente = 5 * (k + 1)
                 print(f"{operation} membre {membre} : à reprendre ({e}) ; attente {attente} s", flush=True)
                 time.sleep(attente)
         raise AssertionError("inaccessible")
@@ -131,6 +175,18 @@ def horizon_du_run(api: Api, run: datetime) -> int:
         raise RuntimeError("DescribeCoverage sans endPosition")
     t = datetime.strptime(fin.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     return int((t - run).total_seconds() // 3600)
+
+
+def heures_disponibles(api: Api, run: datetime, champ: str) -> list[int]:
+    """Échéances (heures depuis le run) réellement publiées pour un champ : horaires jusqu'à H+48, puis toutes les 3 h."""
+    xml = api.get(0, "DescribeCoverage", {"coverageid": COUVERTURES[champ].format(run=iso_wcs(run))})
+    if xml is None:
+        raise RuntimeError(f"DescribeCoverage introuvable pour {champ}, run {run:%Y-%m-%d %H} UTC")
+    for bloc in re.findall(r"<gmlrgrid:coefficients>([^<]*)<", xml):
+        valeurs = bloc.split()
+        if len(valeurs) > 10:  # l'axe du temps (les autres axes n'ont qu'une valeur)
+            return sorted({int(v) // 3600 for v in valeurs})
+    raise RuntimeError(f"axe du temps introuvable pour {champ}")
 
 
 def latest_run(api: Api, candidats: int = 3) -> tuple[datetime, int]:

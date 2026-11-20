@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from source import MEMBERS, Api, decode, grid_index, latest_run, steps
+from source import MEMBERS, Api, decode, grid_index, heures_disponibles, latest_run, steps
 
 VERSION = "1.0.0"
 REPO = os.environ.get("GITHUB_REPOSITORY", "meteofrance66/PEARP-01-europe")
@@ -82,7 +82,11 @@ def rafale_3h(vitesse_horaire: np.ndarray, n_steps: int) -> np.ndarray:
     sortie = np.full((vitesse_horaire.shape[0], n_steps, vitesse_horaire.shape[2]), np.nan)
     for k in range(1, n_steps):
         h = 3 * k
-        sortie[:, k] = vitesse_horaire[:, h - 2 : h + 1].max(axis=1) * MS_EN_KMH
+        fenetre = vitesse_horaire[:, h - 2 : h + 1]
+        if np.isnan(fenetre).all(axis=1).any():
+            raise ValueError(f"aucune rafale publiée pour la tranche H+{h - 3} à H+{h}")
+        # Au-delà de H+48 l'API ne publie qu'une échéance sur trois : la tranche n'a alors qu'une rafale horaire (la dernière heure).
+        sortie[:, k] = np.nanmax(fenetre, axis=1) * MS_EN_KMH
     return sortie
 
 
@@ -253,6 +257,10 @@ def main() -> int:
     vitesse = np.full((MEMBERS, horizon + 1, n_pts), np.nan)  # rafale horaire (m/s), heures 1..H
     comp_u = {}
 
+    heures_rafale = [h for h in heures_disponibles(api, run, "u") if 1 <= h <= horizon]
+    manque = [h for h in table if h >= 3 and h not in heures_disponibles(api, run, "p")]
+    if manque:
+        raise ValueError(f"pluie sur 3 h absente aux échéances {manque}")
     # Appels : T aux échéances du tableau, pluie 3 h aux échéances ≥ 3, rafales U et V à toutes les heures ≥ 1.
     taches = []
     for m in range(MEMBERS):
@@ -260,7 +268,7 @@ def main() -> int:
             taches.append(("t", m, h))
             if h >= 3:
                 taches.append(("p", m, h))
-        for h in range(1, horizon + 1):
+        for h in heures_rafale:
             taches.append(("u", m, h))
             taches.append(("v", m, h))
 
@@ -289,6 +297,7 @@ def main() -> int:
             fait += 1
             if fait % 500 == 0 or fait == len(taches):
                 print(f"{fait}/{len(taches)} champs validés", flush=True)
+    print(f"Appels terminés : {len(taches)} champs, {api.n_429} réponses « quota atteint » (429) absorbées", flush=True)
     if comp_u:
         raise ValueError(f"{len(comp_u)} rafales avec une seule composante (U ou V)")
 
