@@ -21,7 +21,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 330
     env:
       PYTHONUNBUFFERED: "1"
       GITHUB_TOKEN: ${{ github.token }}
@@ -68,6 +68,18 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Cartes et fichiers du module WordPress (format historique, dossier wp/)
+        if: steps.build.outputs.publish == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check -r legacy/requirements.txt
+          cd legacy
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if python scripts/build_data.py --output ../build/data/wp 2>&1 | tail -20; then break; fi
+            [ "$attempt" -eq 3 ] && { echo "::error::Échec du format WordPress"; exit 1; }
+            sleep 90
+          done
+          test -f ../build/data/wp/index.json
       - name: Valider la publication complète
         if: steps.build.outputs.publish == 'true'
         run: cd scripts && python validate_data.py ../build/data
