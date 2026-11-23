@@ -9,7 +9,7 @@ on:
         default: false
   schedule:
     # Runs 00 et 12 UTC (complets H+102 vers +5 h) : le plus récent complet est choisi, sinon on recule d'un run.
-    - cron: "50 6,18 * * *"
+    - cron: "25 7,19 * * *"
 
 permissions:
   contents: write
