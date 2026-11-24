@@ -125,5 +125,22 @@ class Membres(unittest.TestCase):
         self.assertEqual(m["values"][0][0][0], [0.0, 0.0, None])
 
 
+class Catalogue(unittest.TestCase):
+    def test_toute_la_france_par_defaut(self):
+        indexes, points, par_dep, n = build_data.charger_catalogue(None)
+        self.assertEqual(len(par_dep), 96)
+        self.assertGreater(n, 34000)
+        self.assertEqual(len(indexes), len(points))
+        self.assertTrue({"66", "11", "09", "34", "2A", "2B", "75"} <= set(par_dep))
+
+    def test_zone_d_origine_avec_les_departements_demandes(self):
+        _, _, par_dep, _ = build_data.charger_catalogue(build_data.DEPS_DEFAUT)
+        self.assertEqual(sorted(par_dep), ["09", "11", "34", "66"])
+
+    def test_departement_inconnu_refuse(self):
+        with self.assertRaises(ValueError):
+            build_data.charger_catalogue(["66", "999"])
+
+
 if __name__ == "__main__":
     unittest.main()

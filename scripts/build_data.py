@@ -26,8 +26,9 @@ VERSION = "1.0.0"
 REPO = os.environ.get("GITHUB_REPOSITORY", "meteofrance66/PEARP-01-europe")
 COLONNES = ["temperature_c", "precipitation_mm", "precipitation_total_mm", "wind_gust_kmh"]
 COLONNES_MEMBRES = ["temperature_c", "precipitation_total_mm", "wind_gust_kmh"]
-# Pyrénées-Orientales et départements voisins (Aude, Ariège, Hérault) : la grille couvre toute l'Europe,
-# mais le catalogue publié reste limité à la zone suivie. `--departements` pour en ajouter.
+# Zone d'origine : Pyrénées-Orientales et départements voisins (Aude, Ariège, Hérault). Depuis le 24 nov. 2026 le catalogue
+# publié couvre la France entière (96 départements) : la grille couvre toute l'Europe et chaque appel ramène déjà le champ
+# complet, donc aucun appel de plus. `--departements 66,11,09,34` pour revenir à la zone d'origine.
 DEPS_DEFAUT = ("66", "11", "09", "34")
 # Départements dont les 35 membres sont aussi publiés tels quels (membres/XX.json) : voir ecrire_membres.
 DEPS_MEMBRES = ("66",)
@@ -41,20 +42,22 @@ def iso(t: datetime) -> str:
 
 
 def charger_catalogue(departements, path: Path = CATALOGUE):
-    """Points de grille utiles (un par maille contenant au moins une commune) et communes par département."""
+    """Points de grille utiles (un par maille contenant au moins une commune) et communes par département.
+
+    `departements` : codes voulus, ou None pour toute la France."""
     communes = json.loads(path.read_text(encoding="utf-8"))["communes"]
-    voulus = set(departements)
+    voulus = None if departements is None else set(departements)
     points: dict[int, tuple[float, float]] = {}
     par_dep: dict[str, list[tuple[list, int]]] = defaultdict(list)
     n = 0
     for c in communes:
-        if str(c[2]) not in voulus:
+        if voulus is not None and str(c[2]) not in voulus:
             continue
         idx, lat, lon = grid_index(float(c[5]), float(c[6]))
         points[idx] = (lat, lon)
         par_dep[str(c[2])].append((c, idx))
         n += 1
-    manquants = voulus - set(par_dep)
+    manquants = set() if voulus is None else voulus - set(par_dep)
     if manquants:
         raise ValueError(f"départements absents du catalogue : {sorted(manquants)}")
     return sorted(points), points, par_dep, n
@@ -227,7 +230,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--run", help="AAAAMMJJHH (sinon le plus récent complet)")
     p.add_argument("--force", action="store_true", help="reconstruire même si ce run est déjà publié")
-    p.add_argument("--departements", default=",".join(DEPS_DEFAUT), help="codes séparés par des virgules")
+    p.add_argument("--departements", default="tous", help="codes séparés par des virgules, ou « tous » pour toute la France (par défaut)")
     p.add_argument("--out-dir", default="build/data")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--pause", type=float, default=0.0, help="secondes d'attente avant chaque appel (quota partagé)")
@@ -248,7 +251,7 @@ def main() -> int:
         print("Ce run est déjà publié : rien à faire.", flush=True)
         return 0
 
-    deps = [d.strip() for d in a.departements.split(",") if d.strip()]
+    deps = None if a.departements.strip().lower() == "tous" else [d.strip() for d in a.departements.split(",") if d.strip()]
     indexes, points, par_dep, n_communes = charger_catalogue(deps)
     print(f"{n_communes} communes, {len(par_dep)} départements, {len(indexes)} points de grille", flush=True)
     n_pts, n_steps = len(indexes), len(table)
